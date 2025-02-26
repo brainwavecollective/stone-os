@@ -33,8 +33,8 @@ DBOS represents a fundamental shift in operating system design by:
 
 ```bash
 # Clone the repository
-git clone https://github.com/brainwavecollective/dbos.git
-cd dbos
+git clone https://github.com/brainwavecollective/stone-os.git
+cd stone-os
 
 # Build the CLI
 make build
