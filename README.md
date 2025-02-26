@@ -1,9 +1,12 @@
-# Stonebraker Inspired Database Operating System (DB OS) Example Project
+# Stone-OS
+Stonebraker Inspired Database Operating System (DBOS) Exploratory Project
  
-On February 25th 2025 I was having a discussion with a friend regarding ideas around a database operating system and what it would take to create such a system. The below README content and related repo is the result of a few brief conversations with Claude 3.7 extended. You can see the final prompt here:  
+On February 25th 2025 I was having a discussion with a friend regarding ideas around a database operating system and what it would take to create such a system. The below README content and related repo is the result of a few brief conversations with Claude 3.7 extended. You can see that conversation here:  
 https://claude.ai/share/67f577c4-ead8-4809-a76b-7cecce7dbe70  
 
 Stone OS is an innovative operating system built on the concept of using an ACID-compliant database as the underlying foundation to manage state changes over time, inspired by Michael Stonebraker's concepts.
+
+Although I've thought this is a super interesting project from the perspective of versioning, and I am curious what it would take to get this across the line, I don't have any specific plans to pursue at the moment. 
 
 This project was inspired by, but is unrelated to Michael Stonebraker. To see some of his related work check out: https://www.dbos.dev/  
 
@@ -28,6 +31,9 @@ DBOS represents a fundamental shift in operating system design by:
 - **SQL Interface**: Query your system state using familiar SQL
 
 ## Getting Started
+
+### Prerequsites 
+ 1. [Install Go](https://go.dev/doc/install)
 
 ### Installation
 
