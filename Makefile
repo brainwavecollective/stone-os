@@ -62,7 +62,7 @@ install-tools:
 
 # Generate Go module files
 init-module:
-	$(GOMOD) init github.com/yourusername/dbos
+	$(GOMOD) init github.com/brainwavecollective/stone-os
 	$(GOMOD) tidy
 
 # Generate initial schema migration

@@ -1,14 +1,32 @@
 package shell
 
 import (
+	"bufio"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/yourusername/dbos/pkg/database"
+	"github.com/brainwavecollective/stone-os/pkg/database"
+	"github.com/brainwavecollective/stone-os/pkg/schema"
 )
+
+// formatSize formats a size in bytes to a human-readable string
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
 
 // ShellState represents the current state of the shell
 type ShellState struct {
@@ -63,13 +81,15 @@ func (s *Shell) Run() {
 		prompt := s.GetPrompt()
 		fmt.Print(prompt)
 
+		// Read a full line of input including spaces
 		var input string
-		if _, err := fmt.Scanln(&input); err != nil {
-			if err.Error() == "unexpected newline" {
-				// Empty input, ignore
-				continue
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			input = scanner.Text()
+		} else {
+			if err := scanner.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
 			}
-			fmt.Fprintf(os.Stderr, "Error reading input: %v\n", err)
 			continue
 		}
 
@@ -238,27 +258,65 @@ func (s *Shell) ChangeDirectory(args []string) error {
 		path = filepath.Join(s.state.CurrentDirectory, path)
 	}
 
+	// Special case for "cd .." - go up one directory
+	if path == ".." || path == "../" {
+		if s.state.CurrentDirectory == "/" {
+			return nil // Already at root
+		}
+		path = filepath.Dir(s.state.CurrentDirectory)
+	}
+
 	// Normalize path
 	path = filepath.Clean(path)
+	if path == "." {
+		path = s.state.CurrentDirectory
+	}
 
-	// Verify directory exists
-	options := database.DefaultQueryOptions()
-	options.BranchID = s.state.CurrentBranch
-	options.PointInTime = s.state.PointInTime
-
-	result, err := s.db.FindResourceByPath(path, options)
+	// Verify directory exists by querying the database directly
+	var query string
+	if s.state.PointInTime != nil {
+		query = `
+			SELECT 1 FROM resources 
+			WHERE type = 'directory' AND path = ? AND valid_from <= ? 
+			AND (valid_to IS NULL OR valid_to > ?)
+		`
+	} else {
+		query = `
+			SELECT 1 FROM resources 
+			WHERE type = 'directory' AND path = ? AND valid_to IS NULL
+		`
+	}
+	
+	var rows *sql.Rows
+	var err error
+	
+	if s.state.PointInTime != nil {
+		pointInTime := *s.state.PointInTime
+		if s.state.CurrentTransaction != nil {
+			rows, err = s.state.CurrentTransaction.ExecuteQuery(query, path, pointInTime, pointInTime)
+		} else {
+			rows, err = s.db.ExecuteQuery(query, path, pointInTime, pointInTime)
+		}
+	} else {
+		if s.state.CurrentTransaction != nil {
+			rows, err = s.state.CurrentTransaction.ExecuteQuery(query, path)
+		} else {
+			rows, err = s.db.ExecuteQuery(query, path)
+		}
+	}
+	
 	if err != nil {
-		return fmt.Errorf("failed to find directory: %w", err)
+		return fmt.Errorf("failed to check directory: %w", err)
 	}
-
-	if result.Count == 0 {
+	defer rows.Close()
+	
+	var exists bool
+	if rows.Next() {
+		exists = true
+	}
+	
+	if !exists {
 		return fmt.Errorf("directory not found: %s", path)
-	}
-
-	// Check that it's a directory
-	resourceType := result.Rows[0][1].(string)
-	if resourceType != "directory" {
-		return fmt.Errorf("not a directory: %s", path)
 	}
 
 	// Update current directory
@@ -268,13 +326,154 @@ func (s *Shell) ChangeDirectory(args []string) error {
 
 // ListDirectory lists the contents of a directory
 func (s *Shell) ListDirectory(args []string) error {
-	// Implementation omitted for brevity
-	// In a real implementation, this would query the database for directory contents
-	fmt.Println("Directory listing would appear here")
+	// Determine path to list
+	path := s.state.CurrentDirectory
+	if len(args) > 0 {
+		if strings.HasPrefix(args[0], "/") {
+			// Absolute path
+			path = args[0]
+		} else {
+			// Relative path
+			path = filepath.Join(s.state.CurrentDirectory, args[0])
+		}
+	}
+	path = filepath.Clean(path)
+
+	// First, verify the directory exists and get its ID
+	var query string
+	if s.state.PointInTime != nil {
+		query = `
+			SELECT id FROM resources 
+			WHERE type = 'directory' AND path = ? AND valid_from <= ? 
+			AND (valid_to IS NULL OR valid_to > ?)
+		`
+	} else {
+		query = `
+			SELECT id FROM resources 
+			WHERE type = 'directory' AND path = ? AND valid_to IS NULL
+		`
+	}
+	
+	var rows *sql.Rows
+	var err error
+	
+	if s.state.PointInTime != nil {
+		pointInTime := *s.state.PointInTime
+		if s.state.CurrentTransaction != nil {
+			rows, err = s.state.CurrentTransaction.ExecuteQuery(query, path, pointInTime, pointInTime)
+		} else {
+			rows, err = s.db.ExecuteQuery(query, path, pointInTime, pointInTime)
+		}
+	} else {
+		if s.state.CurrentTransaction != nil {
+			rows, err = s.state.CurrentTransaction.ExecuteQuery(query, path)
+		} else {
+			rows, err = s.db.ExecuteQuery(query, path)
+		}
+	}
+	
+	if err != nil {
+		return fmt.Errorf("failed to check directory: %w", err)
+	}
+	
+	var dirID string
+	var dirExists bool
+	
+	if rows.Next() {
+		if err := rows.Scan(&dirID); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan directory ID: %w", err)
+		}
+		dirExists = true
+	}
+	rows.Close()
+	
+	if !dirExists {
+		return fmt.Errorf("directory not found: %s", path)
+	}
+	
+	// Now list the contents of the directory
+	if s.state.PointInTime != nil {
+		query = `
+			SELECT id, type, name, metadata
+			FROM resources
+			WHERE parent_id = ? AND valid_from <= ? 
+			AND (valid_to IS NULL OR valid_to > ?)
+			ORDER BY type DESC, name ASC
+		`
+	} else {
+		query = `
+			SELECT id, type, name, metadata
+			FROM resources
+			WHERE parent_id = ? AND valid_to IS NULL
+			ORDER BY type DESC, name ASC
+		`
+	}
+	
+	// Execute query to get the directory contents
+	if s.state.PointInTime != nil {
+		pointInTime := *s.state.PointInTime
+		if s.state.CurrentTransaction != nil {
+			rows, err = s.state.CurrentTransaction.ExecuteQuery(query, dirID, pointInTime, pointInTime)
+		} else {
+			rows, err = s.db.ExecuteQuery(query, dirID, pointInTime, pointInTime)
+		}
+	} else {
+		if s.state.CurrentTransaction != nil {
+			rows, err = s.state.CurrentTransaction.ExecuteQuery(query, dirID)
+		} else {
+			rows, err = s.db.ExecuteQuery(query, dirID)
+		}
+	}
+	
+	if err != nil {
+		return fmt.Errorf("failed to list directory: %w", err)
+	}
+	defer rows.Close()
+	
+	// Display the directory contents
+	fmt.Printf("Contents of %s:\n", path)
+	var hasContents bool
+	
+	for rows.Next() {
+		hasContents = true
+		var id, resType, name string
+		var metadataStr string
+		
+		if err := rows.Scan(&id, &resType, &name, &metadataStr); err != nil {
+			return fmt.Errorf("failed to scan resource: %w", err)
+		}
+		
+		// Display based on type
+		if resType == "directory" {
+			fmt.Printf("%s/\n", name)
+		} else if resType == "file" {
+			// Try to parse metadata for size
+			var metadata schema.ResourceMetadata
+			if err := json.Unmarshal([]byte(metadataStr), &metadata); err == nil {
+				fmt.Printf("%s (%s)\n", name, formatSize(metadata.Size))
+			} else {
+				fmt.Printf("%s\n", name)
+			}
+		} else if resType == "symlink" {
+			// Try to parse metadata for target
+			var metadata schema.ResourceMetadata
+			if err := json.Unmarshal([]byte(metadataStr), &metadata); err == nil {
+				fmt.Printf("%s -> %s\n", name, metadata.SymlinkTarget)
+			} else {
+				fmt.Printf("%s (symlink)\n", name)
+			}
+		} else {
+			fmt.Printf("%s (%s)\n", name, resType)
+		}
+	}
+	
+	if !hasContents {
+		fmt.Println("(empty directory)")
+	}
+	
 	return nil
 }
-
-// other command implementations would be here...
 
 // BeginTransaction starts a new transaction
 func (s *Shell) BeginTransaction() error {
@@ -327,8 +526,6 @@ func (s *Shell) AbortTransaction() error {
 	s.state.CurrentTransaction = nil
 	return nil
 }
-
-// Other command implementations would go here...
 
 // ShowHistory shows command history
 func (s *Shell) ShowHistory(args []string) error {
@@ -483,15 +680,357 @@ func (s *Shell) SwitchBranch(args []string) error {
 
 // MakeDirectory creates a new directory
 func (s *Shell) MakeDirectory(args []string) error {
-	// Implementation omitted for brevity
-	fmt.Println("Directory creation would appear here")
+	if len(args) == 0 {
+		return fmt.Errorf("directory name required")
+	}
+	
+	dirName := args[0]
+	var path string
+	
+	// Handle absolute vs relative paths
+	if strings.HasPrefix(dirName, "/") {
+		path = dirName
+	} else {
+		path = filepath.Join(s.state.CurrentDirectory, dirName)
+	}
+	
+	// Normalize path
+	path = filepath.Clean(path)
+	
+	// Extract the parent directory path and the new directory name
+	parentPath := filepath.Dir(path)
+	newDirName := filepath.Base(path)
+	
+	// Verify parent directory exists
+	query := `
+		SELECT id FROM resources 
+		WHERE type = 'directory' AND path = ? AND valid_to IS NULL
+	`
+	
+	rows, err := s.db.ExecuteQuery(query, parentPath)
+	if err != nil {
+		return fmt.Errorf("failed to check parent directory: %w", err)
+	}
+	
+	var parentID string
+	var parentExists bool
+	
+	if rows.Next() {
+		if err := rows.Scan(&parentID); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan parent directory ID: %w", err)
+		}
+		parentExists = true
+	}
+	rows.Close()
+	
+	if !parentExists {
+		return fmt.Errorf("parent directory not found: %s", parentPath)
+	}
+	
+	// Check if directory already exists
+	query = `
+		SELECT 1 FROM resources 
+		WHERE parent_id = ? AND name = ? AND type = 'directory' AND valid_to IS NULL
+	`
+	
+	existsRows, err := s.db.ExecuteQuery(query, parentID, newDirName)
+	if err != nil {
+		return fmt.Errorf("failed to check if directory exists: %w", err)
+	}
+	
+	var exists bool
+	if existsRows.Next() {
+		exists = true
+	}
+	existsRows.Close()
+	
+	if exists {
+		return fmt.Errorf("directory already exists: %s", path)
+	}
+	
+	// Start a transaction if one isn't already active
+	var tx *database.Transaction
+	var newTx bool
+	
+	if s.state.CurrentTransaction != nil {
+		tx = s.state.CurrentTransaction
+	} else {
+		var err error
+		tx, err = s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %w", err)
+		}
+		newTx = true
+		defer func() {
+			if newTx && tx.IsActive() {
+				tx.Rollback()
+			}
+		}()
+	}
+	
+	// Create the directory
+	dirID := fmt.Sprintf("dir-%d", time.Now().UnixNano())
+	
+	// Create directory metadata
+	metadata := schema.NewDirectoryMetadata(s.state.User)
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal directory metadata: %w", err)
+	}
+	
+	// Insert the directory
+	now := time.Now()
+	_, err = tx.Execute(`
+		INSERT INTO resources (id, type, name, parent_id, path, metadata, valid_from, transaction_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, dirID, schema.ResourceTypeDirectory, newDirName, parentID, path, string(metadataJSON), now, tx.GetID())
+	
+	if err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+	
+	// If we started a new transaction, commit it
+	if newTx {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
+		}
+	}
+	
+	fmt.Printf("Directory created: %s\n", path)
 	return nil
 }
 
 // TouchFile creates an empty file
 func (s *Shell) TouchFile(args []string) error {
-	// Implementation omitted for brevity
-	fmt.Println("File creation would appear here")
+	if len(args) == 0 {
+		return fmt.Errorf("file name required")
+	}
+	
+	fileName := args[0]
+	var path string
+	
+	// Handle absolute vs relative paths
+	if strings.HasPrefix(fileName, "/") {
+		path = fileName
+	} else {
+		path = filepath.Join(s.state.CurrentDirectory, fileName)
+	}
+	
+	// Normalize path
+	path = filepath.Clean(path)
+	
+	// Extract the parent directory path and the new file name
+	parentPath := filepath.Dir(path)
+	newFileName := filepath.Base(path)
+	
+	// Verify parent directory exists
+	query := `
+		SELECT id FROM resources 
+		WHERE type = 'directory' AND path = ? AND valid_to IS NULL
+	`
+	
+	rows, err := s.db.ExecuteQuery(query, parentPath)
+	if err != nil {
+		return fmt.Errorf("failed to check parent directory: %w", err)
+	}
+	
+	var parentID string
+	var parentExists bool
+	
+	if rows.Next() {
+		if err := rows.Scan(&parentID); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan parent directory ID: %w", err)
+		}
+		parentExists = true
+	}
+	rows.Close()
+	
+	if !parentExists {
+		return fmt.Errorf("parent directory not found: %s", parentPath)
+	}
+	
+	// Check if file already exists
+	query = `
+		SELECT 1 FROM resources 
+		WHERE parent_id = ? AND name = ? AND valid_to IS NULL
+	`
+	
+	existsRows, err := s.db.ExecuteQuery(query, parentID, newFileName)
+	if err != nil {
+		return fmt.Errorf("failed to check if file exists: %w", err)
+	}
+	
+	var exists bool
+	if existsRows.Next() {
+		exists = true
+	}
+	existsRows.Close()
+	
+	if exists {
+		// File exists, update its timestamp
+		query = `
+			UPDATE resources 
+			SET valid_to = ?
+			WHERE parent_id = ? AND name = ? AND valid_to IS NULL
+		`
+		
+		now := time.Now()
+		
+		// Start a transaction if one isn't already active
+		var tx *database.Transaction
+		var newTx bool
+		
+		if s.state.CurrentTransaction != nil {
+			tx = s.state.CurrentTransaction
+		} else {
+			tx, err = s.db.Begin()
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction: %w", err)
+			}
+			newTx = true
+			defer func() {
+				if newTx && tx.IsActive() {
+					tx.Rollback()
+				}
+			}()
+		}
+		
+		// Mark the old version as obsolete
+		_, err = tx.Execute(query, now, parentID, newFileName)
+		if err != nil {
+			return fmt.Errorf("failed to update file: %w", err)
+		}
+		
+		// Get the old file's details
+		query = `
+			SELECT id, content, metadata
+			FROM resources 
+			WHERE parent_id = ? AND name = ? AND valid_to = ?
+		`
+		
+		detailRows, err := tx.ExecuteQuery(query, parentID, newFileName, now)
+		if err != nil {
+			return fmt.Errorf("failed to get file details: %w", err)
+		}
+		
+		var oldID string
+		var content []byte
+		var metadataStr string
+		
+		if detailRows.Next() {
+			if err := detailRows.Scan(&oldID, &content, &metadataStr); err != nil {
+				detailRows.Close()
+				return fmt.Errorf("failed to scan file details: %w", err)
+			}
+		}
+		detailRows.Close()
+		
+		// Parse metadata to update timestamp
+		var metadata schema.ResourceMetadata
+		if err := json.Unmarshal([]byte(metadataStr), &metadata); err != nil {
+			return fmt.Errorf("failed to unmarshal metadata: %w", err)
+		}
+		
+		metadata.ModifiedAt = now
+		metadata.AccessedAt = now
+		
+		metadataJSON, err := json.Marshal(metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal metadata: %w", err)
+		}
+		
+		// Create a new version of the file
+		fileID := fmt.Sprintf("file-%d", time.Now().UnixNano())
+		
+		_, err = tx.Execute(`
+			INSERT INTO resources (id, type, name, parent_id, path, content, metadata, valid_from, transaction_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, fileID, schema.ResourceTypeFile, newFileName, parentID, path, content, string(metadataJSON), now, tx.GetID())
+		
+		if err != nil {
+			return fmt.Errorf("failed to create new file version: %w", err)
+		}
+		
+		// If we started a new transaction, commit it
+		if newTx {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit transaction: %w", err)
+			}
+		}
+		
+		fmt.Printf("File updated: %s\n", path)
+	} else {
+		// File doesn't exist, create it
+		fileID := fmt.Sprintf("file-%d", time.Now().UnixNano())
+		
+		// Create file metadata
+		metadata := schema.NewResourceMetadata(s.state.User)
+		metadata.Size = 0 // Empty file
+		
+		// Determine MIME type based on extension
+		ext := strings.ToLower(filepath.Ext(newFileName))
+		switch ext {
+		case ".txt":
+			metadata.MimeType = "text/plain"
+		case ".html", ".htm":
+			metadata.MimeType = "text/html"
+		case ".json":
+			metadata.MimeType = "application/json"
+		case ".md":
+			metadata.MimeType = "text/markdown"
+		case ".go":
+			metadata.MimeType = "text/x-go"
+		default:
+			metadata.MimeType = "application/octet-stream"
+		}
+		
+		metadataJSON, err := json.Marshal(metadata)
+		if err != nil {
+			return fmt.Errorf("failed to marshal metadata: %w", err)
+		}
+		
+		// Start a transaction if one isn't already active
+		var tx *database.Transaction
+		var newTx bool
+		
+		if s.state.CurrentTransaction != nil {
+			tx = s.state.CurrentTransaction
+		} else {
+			tx, err = s.db.Begin()
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction: %w", err)
+			}
+			newTx = true
+			defer func() {
+				if newTx && tx.IsActive() {
+					tx.Rollback()
+				}
+			}()
+		}
+		
+		// Insert the file
+		now := time.Now()
+		_, err = tx.Execute(`
+			INSERT INTO resources (id, type, name, parent_id, path, content, metadata, valid_from, transaction_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, fileID, schema.ResourceTypeFile, newFileName, parentID, path, []byte{}, string(metadataJSON), now, tx.GetID())
+		
+		if err != nil {
+			return fmt.Errorf("failed to create file: %w", err)
+		}
+		
+		// If we started a new transaction, commit it
+		if newTx {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit transaction: %w", err)
+			}
+		}
+		
+		fmt.Printf("File created: %s\n", path)
+	}
+	
 	return nil
 }
 

@@ -32,7 +32,7 @@ DBOS represents a fundamental shift in operating system design by:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/dbos.git
+git clone https://github.com/brainwavecollective/stone-os.git
 cd dbos
 
 # Build the CLI
@@ -92,7 +92,7 @@ DBOS is built on these core components:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to contribute to this project.
+Get at me if you have an interest in contributing to this project.
 
 ## License
 

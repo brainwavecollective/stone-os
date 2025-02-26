@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/yourusername/dbos/pkg/database"
-	"github.com/yourusername/dbos/pkg/schema"
-	"github.com/yourusername/dbos/pkg/shell"
-	"github.com/yourusername/dbos/internal/util"
+	"github.com/brainwavecollective/stone-os/pkg/database"
+	"github.com/brainwavecollective/stone-os/pkg/schema"
+	"github.com/brainwavecollective/stone-os/pkg/shell"
+	"github.com/brainwavecollective/stone-os/internal/util"
 )
 
 var (
@@ -36,7 +36,7 @@ func main() {
 
 	// Set default database path if not specified
 	if *dbPath == "" {
-		homeDir, err := os.UserHomeDir()
+		homeDir, err := util.GetHomeDirectory()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting home directory: %v\n", err)
 			os.Exit(1)
@@ -46,20 +46,27 @@ func main() {
 
 	// Ensure data directory exists
 	dataDir := filepath.Dir(*dbPath)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := util.CreateDirectory(dataDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating data directory: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Initialize database connection
+	fmt.Println("Connecting to database...")
 	db, err := database.Connect(*dbType, *dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "Starting with in-memory database for demo purposes...\n")
+		db, err = database.Connect("inmemory", ":memory:")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating in-memory database: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	defer db.Close()
 
 	// Initialize database schema
+	fmt.Println("Initializing database schema...")
 	if err := schema.Initialize(db); err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing schema: %v\n", err)
 		os.Exit(1)

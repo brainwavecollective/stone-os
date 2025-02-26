@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourusername/dbos/pkg/database"
-	"github.com/yourusername/dbos/pkg/schema"
+	"github.com/brainwavecollective/stone-os/pkg/database"
+	"github.com/brainwavecollective/stone-os/pkg/schema"
 )
 
 // File represents a file in the filesystem

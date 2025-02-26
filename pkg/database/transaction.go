@@ -37,8 +37,8 @@ func (t *Transaction) Execute(statement string, args ...interface{}) (sql.Result
 	return t.tx.Exec(statement, args...)
 }
 
-// Query executes a SQL query within the transaction
-func (t *Transaction) Query(query string, args ...interface{}) (*sql.Rows, error) {
+// ExecuteQuery executes a SQL query within the transaction
+func (t *Transaction) ExecuteQuery(query string, args ...interface{}) (*sql.Rows, error) {
 	if t.status != TransactionStatusActive {
 		return nil, fmt.Errorf("transaction is not active (status: %s)", t.status)
 	}
